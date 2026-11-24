@@ -1,0 +1,1401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LR Smart Board, O&G Hospital Tengku Permaisuri Norashikin</title>
+    <!-- React & Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Phosphor Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; overflow: hidden; }
+        .patient-card { transition: all 0.2s ease; }
+        .patient-card:hover { transform: translateY(-2px); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        .urgency-high { border-left: 5px solid #ef4444; }
+        .urgency-med { border-left: 5px solid #f59e0b; }
+        .urgency-low { border-left: 5px solid #10b981; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 20px; }
+        
+        .loading-overlay {
+            position: fixed; inset: 0; background: rgba(255, 255, 255, 0.9);
+            display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 9999;
+        }
+        
+        @keyframes urgent-flash {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); border-color: #ef4444; }
+            50% { box-shadow: 0 0 15px 5px rgba(239, 68, 68, 0.2); border-color: #fca5a5; }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); border-color: #ef4444; }
+        }
+        .active-alert { animation: urgent-flash 2s infinite; border-width: 2px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        const playAlertSound = (type) => {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            
+            if (type === 'critical') {
+                oscillator.type = 'square';
+                oscillator.frequency.setValueAtTime(800, audioCtx.currentTime);
+                oscillator.frequency.setValueAtTime(1200, audioCtx.currentTime + 0.1);
+                gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+                oscillator.start(audioCtx.currentTime);
+                oscillator.stop(audioCtx.currentTime + 0.3);
+            } else if (type === 'new_booking') {
+                oscillator.type = 'sine';
+                oscillator.frequency.setValueAtTime(523.25, audioCtx.currentTime); 
+                oscillator.frequency.setValueAtTime(880, audioCtx.currentTime + 0.2); 
+                gainNode.gain.setValueAtTime(0.15, audioCtx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.6);
+                oscillator.start(audioCtx.currentTime);
+                oscillator.stop(audioCtx.currentTime + 0.6);
+            } else if (type === 'called') {
+                oscillator.type = 'sine';
+                oscillator.frequency.setValueAtTime(523.25, audioCtx.currentTime); 
+                oscillator.frequency.setValueAtTime(659.25, audioCtx.currentTime + 0.2); 
+                gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.6);
+                oscillator.start(audioCtx.currentTime);
+                oscillator.stop(audioCtx.currentTime + 0.6);
+            } else if (type === 'update') {
+                oscillator.type = 'triangle';
+                oscillator.frequency.setValueAtTime(700, audioCtx.currentTime);
+                gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+                oscillator.start(audioCtx.currentTime);
+                oscillator.stop(audioCtx.currentTime + 0.2);
+            }
+        };
+
+        const API_URL = 'https://script.google.com/macros/s/AKfycbyhv7ZcJl_jtPszbusDj3KNEr1zYtkx40mq16SIvKTQUQTdm4zClxj7sjMdU8ydtP4C/exec';
+        
+        const formatDateTimeDisp = (dateTimeStr) => {
+            if (!dateTimeStr) return '';
+            
+            let d;
+            if (typeof dateTimeStr === 'number' || (typeof dateTimeStr === 'string' && !isNaN(dateTimeStr) && dateTimeStr.trim() !== '')) {
+                d = new Date(Number(dateTimeStr)); 
+            } else {
+                d = new Date(dateTimeStr); 
+            }
+
+            if (isNaN(d.getTime())) return dateTimeStr; 
+
+            const today = new Date();
+            const hrs = d.getHours().toString().padStart(2, '0');
+            const mins = d.getMinutes().toString().padStart(2, '0');
+            
+            if (d.getDate() === today.getDate() && d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear()) {
+                 return `${hrs}:${mins}`;
+            }
+            return `${d.getDate()}/${d.getMonth()+1} ${hrs}:${mins}`;
+        };
+
+        const LR_BEDS_LEFT = [
+            'Room 3', 
+            'Room 4', 
+            'Room 5', 
+            'OT', 
+            'Room 1A (Overflow)', 
+            'Room 14A (Overflow)'
+        ];
+        
+        const LR_BEDS_RIGHT = [
+            'Room 6', 
+            'Room 13 (Urg)', 
+            'Room 2 (Urg)', 
+            'Room 7 (ISO)', 
+            'Room 1B (Overflow)', 
+            'Room 14B (Overflow)'
+        ];
+
+        const CustomDateTimePicker = ({ name, defaultValue, disabled }) => {
+            const [date, setDate] = React.useState('');
+            const [hour, setHour] = React.useState('00');
+            const [minute, setMinute] = React.useState('00');
+
+            React.useEffect(() => {
+                if (defaultValue) {
+                    const d = new Date(defaultValue);
+                    if (!isNaN(d.getTime())) {
+                        const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                        setDate(localDate);
+                        setHour(d.getHours().toString().padStart(2, '0'));
+                        const mins = d.getMinutes();
+                        const roundedMins = Math.round(mins / 5) * 5;
+                        const finalMins = roundedMins === 60 ? 0 : roundedMins;
+                        setMinute(finalMins.toString().padStart(2, '0'));
+                    }
+                } else {
+                    const d = new Date();
+                    const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                    setDate(localDate);
+                    setHour(d.getHours().toString().padStart(2, '0'));
+                    const roundedMins = Math.round(d.getMinutes() / 5) * 5;
+                    const finalMins = roundedMins === 60 ? 0 : roundedMins;
+                    setMinute(finalMins.toString().padStart(2, '0'));
+                }
+            }, [defaultValue]);
+
+            const minutesList = ['00', '05', '10', '15', '20', '25', '30', '35', '40', '45', '50', '55'];
+            const hoursList = Array.from({length: 24}, (_, i) => i.toString().padStart(2, '0'));
+            
+            // Generate standard YYYY-MM-DDTHH:MM:00 string (locks it to local timezone without UTC shift)
+            const valueString = (() => {
+                if (date && hour && minute) {
+                    return `${date}T${hour}:${minute}:00`; 
+                }
+                return '';
+            })();
+
+            return (
+                <div className={`flex gap-1 ${disabled ? 'opacity-50 pointer-events-none' : ''}`}>
+                    <input type="hidden" name={name} value={valueString} />
+                    <input type="date" value={date} onChange={e => setDate(e.target.value)} disabled={disabled} className="border rounded p-1.5 text-xs bg-white w-28" required={!disabled} />
+                    <select value={hour} onChange={e => setHour(e.target.value)} disabled={disabled} className="border rounded p-1.5 text-xs bg-white w-12 text-center font-mono" required={!disabled}>
+                        {hoursList.map(h => <option key={h} value={h}>{h}</option>)}
+                    </select>
+                    <span className="font-bold text-slate-500 self-center">:</span>
+                    <select value={minute} onChange={e => setMinute(e.target.value)} disabled={disabled} className="border rounded p-1.5 text-xs bg-white w-12 text-center font-mono" required={!disabled}>
+                        {minutesList.map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                </div>
+            );
+        };
+
+        const AssignBedModal = ({ patient, activePatients, onClose, onConfirm, isMoveMode }) => {
+            const renderBedButton = (bed) => {
+                const isOccupied = activePatients.some(p => p.assignedBed === bed && (p.status === 'IN_LR' || p.status === 'DELIVERED') && p.id !== patient.id);
+                const isReserved = activePatients.some(p => (p.status === 'CALLED' || p.status === 'EN_ROUTE') && p.calledToBed === bed);
+                const isUnavailable = isOccupied || isReserved;
+                
+                return (
+                    <button 
+                        key={bed} disabled={isUnavailable} onClick={() => onConfirm(bed)}
+                        className={`p-2 rounded border text-sm font-semibold transition flex flex-col items-center justify-center min-h-[48px] ${isUnavailable ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed' : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 hover:border-indigo-400'}`}>
+                        {bed}
+                        {isOccupied && <span className="text-[10px] font-normal">Occupied</span>}
+                        {isReserved && <span className="text-[10px] font-bold text-blue-500">Incoming</span>}
+                    </button>
+                );
+            };
+
+            return (
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-5">
+                        <h2 className="text-lg font-bold text-slate-800 mb-1">{isMoveMode ? 'Move Patient to New Bed' : 'Assign Bed & Call'}</h2>
+                        <p className="text-sm text-slate-500 mb-4">{patient.name}</p>
+                        
+                        <div className="grid grid-cols-2 gap-3 mb-5 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                            <div className="flex flex-col gap-2">
+                                {LR_BEDS_LEFT.map(renderBedButton)}
+                            </div>
+                            <div className="flex flex-col gap-2">
+                                {LR_BEDS_RIGHT.map(renderBedButton)}
+                            </div>
+                        </div>
+                        <button onClick={onClose} className="w-full py-2.5 text-sm font-semibold text-slate-600 bg-slate-200 rounded hover:bg-slate-300 transition shadow-sm">Cancel</button>
+                    </div>
+                </div>
+            );
+        };
+
+        const BedSlot = ({ bedName, patient, incoming, isLR, currentTime, onUpdate, onDeliver, onSendToOT, onClear, onArrived, onAcknowledge, onMoveBed }) => {
+            const [ackName, setAckName] = React.useState('');
+            const isVacant = !patient;
+            
+            const formatLrTime = (admissionTime) => {
+                if (!admissionTime) return '0m';
+                const diffMins = Math.floor((currentTime - new Date(admissionTime).getTime()) / 60000);
+                const hrs = Math.floor(diffMins / 60);
+                const mins = diffMins % 60;
+                return hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+            };
+
+            if (incoming && isVacant) {
+                const isEnRoute = incoming.status === 'EN_ROUTE';
+                return (
+                    <div className={`rounded-lg border-2 border-dashed p-3 flex flex-col items-center justify-center min-h-[140px] transition-all relative overflow-hidden ${isEnRoute ? 'bg-indigo-50/70 border-indigo-400 text-indigo-700' : 'bg-blue-50/70 border-blue-400 text-blue-600'}`}>
+                        <div className={`absolute inset-0 opacity-10 animate-pulse ${isEnRoute ? 'bg-indigo-400' : 'bg-blue-400'}`}></div>
+                        {isEnRoute ? (
+                            <i className="ph-fill ph-person-simple-walk animate-bounce text-3xl mb-1 relative z-10"></i>
+                        ) : (
+                            <i className="ph ph-spinner-gap animate-spin text-3xl mb-1 relative z-10"></i>
+                        )}
+                        <span className="font-bold text-sm text-center relative z-10">{bedName}</span>
+                        <span className="text-[11px] font-bold text-center mt-1 text-inherit relative z-10">Incoming:<br/>{incoming.name}</span>
+                        
+                        {isEnRoute ? (
+                            <>
+                                <span className="text-[9px] mt-1 bg-indigo-100 px-1.5 py-0.5 rounded font-mono border border-indigo-200 text-center relative z-10">
+                                    Sent by {incoming.wardNotedBy}
+                                </span>
+                                {isLR && (
+                                    <button onClick={() => onArrived(incoming.id)} className="mt-2 w-full bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold py-1.5 rounded shadow-sm relative z-10 transition">
+                                        Patient Arrived
+                                    </button>
+                                )}
+                            </>
+                        ) : (
+                            <span className="text-[10px] mt-1 bg-blue-100 px-2 py-0.5 rounded font-mono border border-blue-200 relative z-10">
+                                Called {Math.floor((currentTime - new Date(incoming.callTime).getTime()) / 60000)}m ago
+                            </span>
+                        )}
+                    </div>
+                );
+            }
+
+            if (isVacant) {
+                return (
+                    <div className="bg-slate-200/50 rounded-lg border-2 border-dashed border-slate-300 p-4 flex flex-col items-center justify-center text-slate-400 min-h-[140px] transition-all">
+                        <i className="ph ph-bed text-3xl mb-1"></i>
+                        <span className="font-bold text-sm">{bedName}</span>
+                        <span className="text-xs">Vacant</span>
+                    </div>
+                );
+            }
+
+            const isDelivered = patient.status === 'DELIVERED';
+            const isReviewOverdue = patient.lastVE?.nextReviewTime && currentTime > new Date(patient.lastVE.nextReviewTime).getTime();
+            
+            const needsNormalAck = patient.lastVE?.alertRole === 'LR';
+            const needsReviewAck = isReviewOverdue && !patient.lastVE?.reviewAcked && isLR;
+            const hasActiveAlert = !isDelivered && (needsNormalAck || needsReviewAck);
+
+            const memLiqStr = (() => {
+                if (patient.membrane === 'Intact') return 'MI';
+                let l = patient.liquor;
+                if (l === 'Clear') l = 'CL';
+                else if (l === 'Blood stained') l = 'Blood';
+                const timeStr = patient.romTime ? ` (${formatDateTimeDisp(patient.romTime)})` : '';
+                if (patient.membrane === 'PROM_MI') return `PROM/SROM${timeStr} - MI - ${l}`;
+                return `${patient.membrane}${timeStr} - ${l}`;
+            })();
+            const isAbnormalLiq = patient.membrane !== 'Intact' && !['Clear', 'N/A'].includes(patient.liquor);
+
+            return (
+                <div className={`rounded-lg border shadow-sm p-3 flex flex-col justify-between min-h-[160px] transition-all ${isDelivered ? 'bg-emerald-50 border-emerald-300' : 'bg-white border-indigo-200 border-l-4 border-l-indigo-500'} ${hasActiveAlert ? 'active-alert' : ''}`}>
+                    
+                    {hasActiveAlert && (
+                        <div className="bg-red-100 border border-red-300 rounded p-2 mb-2 shadow-inner">
+                            <div className="text-red-700 font-bold text-[10px] flex items-center gap-1.5 mb-1.5 animate-pulse uppercase tracking-wider leading-tight">
+                                <i className="ph-fill ph-warning-circle text-lg"></i> 
+                                ACTION REQ: {needsNormalAck ? patient.lastVE?.alertMsg : 'PARTOGRAM REVIEW OVERDUE'}
+                            </div>
+                            <div className="flex gap-2">
+                                <input type="text" value={ackName} onChange={e => setAckName(e.target.value)} placeholder="Your Name (MO/SN)" className="flex-1 text-xs p-1.5 border border-red-300 rounded bg-white outline-none focus:border-red-500" />
+                                <button onClick={() => { if(ackName) onAcknowledge(patient.id, ackName, needsNormalAck ? 'NORMAL' : 'REVIEW'); }} className="bg-red-600 hover:bg-red-500 text-white text-[11px] font-bold px-3 py-1.5 rounded shadow-sm transition">ACK</button>
+                            </div>
+                        </div>
+                    )}
+
+                    <div>
+                        <div className="flex justify-between items-start mb-1">
+                            <span className={`text-xs font-bold px-1.5 py-0.5 rounded flex items-center gap-1 shadow-sm ${isDelivered ? 'bg-emerald-100 text-emerald-800' : 'bg-indigo-600 text-white'}`}>
+                                <i className="ph-fill ph-bed"></i> {bedName}
+                            </span>
+                            {!isDelivered && patient.admissionTime && (
+                                <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-bold border border-amber-200 flex items-center gap-1 shadow-sm">
+                                    <i className="ph-fill ph-clock-countdown"></i> {formatLrTime(patient.admissionTime)}
+                                </span>
+                            )}
+                        </div>
+                        
+                        <h3 className="font-bold text-slate-800 text-sm leading-tight mt-2">{patient.name}</h3>
+                        <p className="text-[9px] text-slate-500 font-mono mb-1.5">{patient.ic} • G{patient.gravida}P{patient.para} • {patient.poa}</p>
+
+                        {isDelivered ? (
+                            <div className="mt-3 p-2 bg-emerald-100/60 rounded border border-emerald-200 flex flex-col items-center justify-center min-h-[60px]">
+                                <p className="font-bold text-emerald-800 text-[11px] flex items-center gap-1.5 mb-1"><i className="ph-fill ph-baby text-lg"></i> Delivered at {formatDateTimeDisp(patient.deliveryTime)}</p>
+                                {patient.issues && patient.issues.length > 0 && (
+                                    <p className="text-[9px] text-emerald-700 text-center font-semibold leading-tight">{patient.issues.join(', ')}</p>
+                                )}
+                            </div>
+                        ) : (
+                            <div className="text-[10px] space-y-1 mb-2 bg-slate-50 p-1.5 rounded border border-slate-100">
+                                <p><span className="font-bold text-slate-600">Type:</span> <span className="text-indigo-600 font-bold">{patient.admissionType}</span></p>
+                                
+                                {(patient.gbs || patient.epidural) && (
+                                    <div className="flex gap-1 mb-0.5 mt-0.5">
+                                        {patient.gbs && <span className="px-1.5 py-0.5 bg-rose-100 text-rose-700 font-bold rounded shadow-sm border border-rose-200">GBS +ve</span>}
+                                        {patient.epidural && <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 font-bold rounded shadow-sm border border-blue-200">Epidural</span>}
+                                    </div>
+                                )}
+                                {patient.issues && patient.issues.length > 0 && (
+                                    <p><span className="font-bold text-slate-600">Risks:</span> <span className="text-rose-600 font-semibold leading-tight">{patient.issues.join(', ')}</span></p>
+                                )}
+
+                                <div className="flex justify-between gap-1 pt-1 border-t border-slate-200 mt-1 relative">
+                                    <p><span className="font-bold text-slate-600">VE:</span> {patient.lastVE?.dilation}cm, Cx {patient.lastVE?.cervix} <span className="text-slate-400">(@ {formatDateTimeDisp(patient.lastVE?.time)})</span></p>
+                                </div>
+                                
+                                {patient.lastVE?.nextReviewTime && (
+                                    <div className={`mt-1 px-1.5 py-0.5 rounded text-[9px] font-bold border shadow-sm flex items-center justify-center gap-1 ${isReviewOverdue ? 'bg-rose-500 text-white border-rose-600 animate-pulse' : 'bg-slate-200 text-slate-700 border-slate-300'}`}>
+                                        <i className="ph-fill ph-clock"></i> Next Partogram Review: {formatDateTimeDisp(patient.lastVE.nextReviewTime)}
+                                    </div>
+                                )}
+
+                                <div className="flex justify-between gap-1 mt-1">
+                                    <p><span className="font-bold text-slate-600">Memb:</span> <span className={`${isAbnormalLiq ? 'text-red-600 font-bold' : 'text-slate-700 font-semibold'}`}>{memLiqStr}</span></p>
+                                    <p><span className="font-bold text-slate-600">CTG:</span> <span className={patient.ctg === 'Normal' ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>{patient.ctg}</span></p>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-200 mt-auto">
+                        {isLR ? (
+                            isDelivered ? (
+                                <div className="flex gap-1.5 w-full">
+                                    <button onClick={onMoveBed} className="flex-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[10px] font-bold py-1.5 rounded transition shadow-sm flex items-center justify-center gap-1">
+                                        <i className="ph-bold ph-arrows-left-right"></i> Move Bed
+                                    </button>
+                                    <button onClick={onClear} className="flex-[1.5] bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-bold py-1.5 rounded transition shadow-sm flex items-center justify-center gap-1">
+                                        <i className="ph-bold ph-sign-out"></i> Transfer to ward
+                                    </button>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-2 gap-1.5">
+                                    <button onClick={onUpdate} className={`col-span-1 ${isReviewOverdue ? 'bg-rose-100 hover:bg-rose-200 text-rose-800 border-rose-300' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-300'} text-[10px] font-bold py-1.5 rounded transition border shadow-sm flex items-center justify-center gap-1`}>
+                                        <i className="ph-bold ph-pencil-simple"></i> VE
+                                    </button>
+                                    <button onClick={onDeliver} className="col-span-1 bg-emerald-500 hover:bg-emerald-400 text-white text-[10px] font-bold py-1.5 rounded transition shadow-sm flex items-center justify-center gap-1"><i className="ph-bold ph-baby"></i> Delivered</button>
+                                    {bedName !== 'OT' ? (
+                                        <>
+                                            <button onClick={onMoveBed} className="bg-slate-100 hover:bg-slate-200 text-slate-600 text-[10px] font-bold py-1.5 rounded transition border border-slate-300 shadow-sm flex items-center justify-center gap-1"><i className="ph-bold ph-arrows-left-right"></i> Move</button>
+                                            <button onClick={onSendToOT} className="bg-rose-50 hover:bg-rose-100 text-rose-700 text-[10px] font-bold py-1.5 rounded transition border border-rose-300 shadow-sm flex items-center justify-center gap-1"><i className="ph-bold ph-warning"></i> To OT</button>
+                                        </>
+                                    ) : (
+                                        <button onClick={onMoveBed} className="col-span-2 bg-slate-100 hover:bg-slate-200 text-slate-600 text-[10px] font-bold py-1.5 rounded transition border border-slate-300 shadow-sm flex items-center justify-center gap-1"><i className="ph-bold ph-arrows-left-right"></i> Move out of OT</button>
+                                    )}
+                                </div>
+                            )
+                        ) : (
+                            <div className="w-full text-center py-1.5 bg-slate-100 rounded text-[10px] font-bold text-slate-500 flex items-center justify-center gap-1 border border-slate-200">
+                                {isDelivered ? <><i className="ph-fill ph-check-circle text-emerald-500"></i> Delivered. Awaiting Transfer.</> : <><i className="ph-fill ph-activity text-indigo-500"></i> Active in LR</>}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [userRole, setUserRole] = React.useState(null); 
+            const [patients, setPatients] = React.useState([]);
+            const [passwords, setPasswords] = React.useState(null);
+            
+            const [isInitialLoad, setIsInitialLoad] = React.useState(true);
+            const [isSyncing, setIsSyncing] = React.useState(false);
+            
+            const [isBookingModalOpen, setIsBookingModalOpen] = React.useState(false);
+            const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+            
+            const [updateModalPatient, setUpdateModalPatient] = React.useState(null);
+            const [assignBedPatient, setAssignBedPatient] = React.useState(null);
+            const [moveBedPatient, setMoveBedPatient] = React.useState(null);
+            const [deliverModalPatient, setDeliverModalPatient] = React.useState(null);
+            const [toast, setToast] = React.useState(null);
+            
+            const [currentTime, setCurrentTime] = React.useState(Date.now());
+            const prevPatientsRef = React.useRef([]);
+            const isSyncingRef = React.useRef(false);
+            
+            const fetchPatients = async () => {
+                if(isSyncingRef.current || API_URL === 'PASTE_YOUR_WEB_APP_URL_HERE') return; 
+
+                try {
+                    const response = await fetch(API_URL);
+                    const textData = await response.text(); 
+                    
+                    try {
+                        const data = JSON.parse(textData); 
+                        if (Array.isArray(data)) {
+                            setPatients(data);
+                        } else {
+                            setPatients(data.patients || []);
+                            if(data.passwords) setPasswords(data.passwords);
+                        }
+                    } catch (jsonError) {
+                        console.error("Data Parse Error", textData);
+                    }
+                } catch (error) {
+                    console.error("Network Fetch error:", error);
+                } finally {
+                    setIsInitialLoad(false);
+                }
+            };
+
+            const syncToDB = (action, payload) => {
+                if(API_URL === 'PASTE_YOUR_WEB_APP_URL_HERE') return;
+                setIsSyncing(true);
+                isSyncingRef.current = true;
+                
+                fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                    body: JSON.stringify({ action, ...payload })
+                }).finally(() => {
+                    setTimeout(() => {
+                        setIsSyncing(false);
+                        isSyncingRef.current = false;
+                    }, 2500); 
+                });
+            };
+
+            React.useEffect(() => {
+                fetchPatients(); 
+                const clockInterval = setInterval(() => setCurrentTime(Date.now()), 60000);
+                return () => clearInterval(clockInterval);
+            }, []);
+
+            React.useEffect(() => {
+                if (userRole) {
+                    const pollInterval = setInterval(fetchPatients, 5000);
+                    return () => clearInterval(pollInterval);
+                }
+            }, [userRole]);
+            
+            React.useEffect(() => {
+                if (isInitialLoad || !userRole) return;
+                
+                let shouldChime = false;
+                const myAlertRole = (userRole === 'LR' || userRole === 'Admin') ? 'LR' : userRole; 
+
+                patients.forEach(p => {
+                    const prevP = prevPatientsRef.current.find(old => old.id === p.id);
+                    const hasNewAlert = p.lastVE?.alertRole === myAlertRole && (!prevP || prevP.lastVE?.alertRole !== myAlertRole);
+                    const isNewlyOverdue = (myAlertRole === 'LR' && p.lastVE?.nextReviewTime && currentTime > new Date(p.lastVE.nextReviewTime).getTime() && !p.lastVE?.reviewAcked) && 
+                                           (!prevP || !(prevP.lastVE?.nextReviewTime && currentTime > new Date(prevP.lastVE.nextReviewTime).getTime() && !prevP.lastVE?.reviewAcked));
+                    
+                    if (hasNewAlert || isNewlyOverdue) shouldChime = true;
+                });
+
+                if (shouldChime) playAlertSound('new_booking');
+                prevPatientsRef.current = patients;
+            }, [patients, currentTime, isInitialLoad, userRole]);
+
+            const calculatePriority = (patient) => {
+                let score = 0;
+                
+                // IOL Priority (+10 for IOL, 0 for spontaneous)
+                if (patient.admissionType && patient.admissionType.includes('IOL')) score += 10;
+                
+                // CTG
+                if (patient.ctg === 'Pathological') score += 100;
+                if (patient.ctg === 'Suspicious') score += 50;
+                
+                // Liquor
+                if (patient.liquor === 'TMSL' || patient.liquor === 'Blood stained') score += 40;
+                else if (patient.liquor === 'MMSL') score += 30;
+                else if (patient.liquor === 'LMSL') score += 15;
+
+                // GBS & ROM (+30 stacked if both)
+                const hasRom = ['SROM', 'ARM'].includes(patient.membrane) || patient.membrane === 'PROM_MI';
+                if (hasRom) {
+                    score += 15;
+                    if (patient.gbs) score += 15; 
+                }
+                
+                // Dilation (+40 for imminent delivery)
+                if (patient.lastVE) {
+                    if (patient.lastVE.dilation >= 9) score += 40;
+                    else if (patient.lastVE.dilation >= 7) score += 20;
+                }
+
+                // Previous Scar
+                if (patient.issues && patient.issues.some(i => typeof i === 'string' && i.includes('1 Prev Scar')) && patient.lastVE && patient.lastVE.dilation > 4) {
+                    score += 15;
+                }
+                
+                return score + (patient.manualOverride || 0);
+            };
+
+            const formatWaitTime = (bookTime) => {
+                const diffMins = Math.floor((currentTime - new Date(bookTime).getTime()) / 60000);
+                const days = Math.floor(diffMins / 1440);
+                const hrs = Math.floor((diffMins % 1440) / 60);
+                const mins = diffMins % 60;
+                
+                if (days > 0) return `${days}d ${hrs}h ${mins}m`;
+                if (hrs > 0) return `${hrs}h ${mins}m`;
+                return `${mins}m`;
+            };
+
+            const showToast = (message, type = 'info') => {
+                setToast({ message, type });
+                setTimeout(() => setToast(null), 4000);
+            };
+
+            const handleUpdatePatient = (updatedPatient) => {
+                setPatients(prev => prev.map(p => p.id === updatedPatient.id ? updatedPatient : p));
+                syncToDB('UPDATE', { patient: updatedPatient });
+            };
+
+            const handleUpdatePasswords = (newPasswords) => {
+                setPasswords(newPasswords);
+                syncToDB('UPDATE_PASSWORDS', { passwords: newPasswords });
+                showToast('Passwords updated successfully', 'success');
+                setIsSettingsOpen(false);
+            };
+
+            const handleConfirmBedAssignment = (bed) => {
+                const updatedPatient = { ...assignBedPatient, status: 'CALLED', calledToBed: bed, callTime: new Date().toISOString() };
+                updatedPatient.lastVE = { ...updatedPatient.lastVE, alertRole: updatedPatient.location, alertMsg: `CALLED TO ${bed}` };
+                
+                handleUpdatePatient(updatedPatient);
+                playAlertSound('called');
+                showToast(`${assignBedPatient.name} called to ${bed}. Awaiting Ward transfer.`, 'success');
+                setAssignBedPatient(null);
+            };
+
+            const handleConfirmMoveBed = (bed) => {
+                const updatedPatient = { ...moveBedPatient, assignedBed: bed };
+                handleUpdatePatient(updatedPatient);
+                showToast(`Patient successfully moved to ${bed}`, 'success');
+                setMoveBedPatient(null);
+            };
+
+            const handleWardSend = (id, staffName) => {
+                const patient = patients.find(p => p.id === id);
+                const updatedPatient = { ...patient, status: 'EN_ROUTE', wardSendTime: new Date().toISOString(), wardNotedBy: staffName };
+                updatedPatient.lastVE = { ...updatedPatient.lastVE, alertRole: 'LR', alertMsg: `EN ROUTE (Sent by ${staffName})` };
+                
+                handleUpdatePatient(updatedPatient);
+                playAlertSound('update');
+                showToast('Transfer confirmed. Patient en route to LR.', 'success');
+            };
+
+            const handlePatientArrived = (id) => {
+                const patient = patients.find(p => p.id === id);
+                const updatedPatient = { ...patient, status: 'IN_LR', assignedBed: patient.calledToBed, admissionTime: new Date().toISOString() };
+                handleUpdatePatient(updatedPatient);
+                playAlertSound('update');
+                showToast('Patient arrived. LR timer started.', 'success');
+            };
+
+            const handleSendToOT = (id) => {
+                const patient = patients.find(p => p.id === id);
+                const updatedPatient = { ...patient, status: 'IN_LR', assignedBed: 'OT' };
+                handleUpdatePatient(updatedPatient);
+                playAlertSound('critical');
+                showToast('URGENT: Patient transferred to OT', 'warning');
+            };
+
+            const handleConfirmDelivery = (time) => {
+                const today = new Date();
+                const [hours, minutes] = time.split(':');
+                today.setHours(parseInt(hours, 10), parseInt(minutes, 10), 0, 0);
+                
+                const pad = (n) => String(n).padStart(2, '0');
+                const deliveryISO = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}T${pad(today.getHours())}:${pad(today.getMinutes())}:00`;
+                
+                const updatedPatient = { 
+                    ...deliverModalPatient, 
+                    status: 'DELIVERED', 
+                    deliveryTime: deliveryISO,
+                    lastVE: { ...deliverModalPatient.lastVE, alertRole: null, alertMsg: null, reviewAcked: true } 
+                };
+                handleUpdatePatient(updatedPatient);
+                showToast('Delivery recorded. Bed can be transferred when patient leaves.', 'success');
+                setDeliverModalPatient(null);
+            };
+
+            const handleClearBed = (id) => {
+                const patient = patients.find(p => p.id === id);
+                const updatedPatient = { 
+                    ...patient, 
+                    status: 'DISCHARGED',
+                    lastVE: { ...patient.lastVE, alertRole: null, alertMsg: null, reviewAcked: true }
+                };
+                setPatients(prev => prev.map(p => p.id === id ? updatedPatient : p));
+                syncToDB('UPDATE', { patient: updatedPatient });
+                showToast('Patient transferred to Ward. Record saved to archive.', 'info');
+            };
+
+            const handleCancelBooking = (id) => {
+                const patient = patients.find(p => p.id === id);
+                const updatedPatient = { 
+                    ...patient, 
+                    status: 'CANCELLED',
+                    lastVE: { ...patient.lastVE, alertRole: null, alertMsg: null, reviewAcked: true }
+                };
+                setPatients(prev => prev.map(p => p.id === id ? updatedPatient : p));
+                syncToDB('UPDATE', { patient: updatedPatient });
+                showToast('Booking cancelled. Record saved to archive.', 'info');
+            };
+
+            const handleManualBumpUp = (id) => {
+                const patient = patients.find(p => p.id === id);
+                const updatedPatient = { ...patient, manualOverride: (patient.manualOverride || 0) + 10 };
+                handleUpdatePatient(updatedPatient);
+                playAlertSound('update');
+                showToast('Priority nudged UP', 'success');
+            };
+
+            const handleManualBumpDown = (id) => {
+                const patient = patients.find(p => p.id === id);
+                const updatedPatient = { ...patient, manualOverride: (patient.manualOverride || 0) - 10 };
+                handleUpdatePatient(updatedPatient);
+                playAlertSound('update');
+                showToast('Priority nudged DOWN', 'info');
+            };
+
+            const handleAcknowledgeAlert = (id, staffName, alertType) => {
+                const patient = patients.find(p => p.id === id);
+                const updatedPatient = { ...patient };
+                
+                if (alertType === 'NORMAL') {
+                    if (updatedPatient.lastVE?.alertMsg === 'NEW BOOKING') {
+                        updatedPatient.notedBy = staffName;
+                        updatedPatient.notedTime = new Date().toISOString();
+                    }
+                    updatedPatient.lastVE = { 
+                        ...updatedPatient.lastVE, 
+                        alertRole: null, 
+                        alertMsg: null,
+                        lastGeneralAckBy: staffName,
+                        lastGeneralAckTime: new Date().toISOString()
+                    };
+                } 
+                else if (alertType === 'REVIEW') {
+                    updatedPatient.lastVE = { 
+                        ...updatedPatient.lastVE, 
+                        reviewAcked: true,
+                        reviewAckBy: staffName,
+                        reviewAckTime: new Date().toISOString()
+                    };
+                }
+                
+                handleUpdatePatient(updatedPatient);
+                playAlertSound('update');
+                showToast(`Alert acknowledged by ${staffName}`, 'success');
+            };
+
+            const handleNewBooking = (newPatient) => {
+                newPatient.lastVE = { ...newPatient.lastVE, alertRole: 'LR', alertMsg: 'NEW BOOKING' };
+                setPatients(prev => [...prev, newPatient]);
+                syncToDB('ADD', { patient: newPatient });
+                setIsBookingModalOpen(false);
+                playAlertSound('new_booking');
+                showToast('New patient booked. Awaiting LR acknowledgement.', 'success');
+            };
+
+            const handleStatusUpdate = (updatedData) => {
+                const patientToUpdate = patients.find(p => p.id === updatedData.id);
+                const newPatient = { ...patientToUpdate, ...updatedData, manualOverride: 0 }; 
+                
+                if (userRole !== 'LR' && userRole !== 'Admin') {
+                    newPatient.lastVE = { ...newPatient.lastVE, alertRole: 'LR', alertMsg: 'CLINICAL STATUS UPDATED' };
+                } else {
+                    newPatient.lastVE = { ...newPatient.lastVE, reviewAcked: false, alertRole: null, alertMsg: null };
+                }
+                
+                handleUpdatePatient(newPatient);
+                setUpdateModalPatient(null);
+                playAlertSound('update');
+                showToast(`Clinical status updated`, 'success');
+            };
+
+            const waitingPatients = patients.filter(p => p.status === 'WAITING' || p.status === 'CALLED').sort((a, b) => {
+                if (a.status === 'CALLED' && b.status !== 'CALLED') return -1;
+                if (b.status === 'CALLED' && a.status !== 'CALLED') return 1;
+                if (a.status === 'CALLED' && b.status === 'CALLED') return new Date(a.callTime).getTime() - new Date(b.callTime).getTime();
+
+                const scoreDiff = calculatePriority(b) - calculatePriority(a);
+                if (scoreDiff !== 0) return scoreDiff;
+                return new Date(a.bookingTime).getTime() - new Date(b.bookingTime).getTime(); 
+            });
+
+            const defaultPasswords = { 'LR': 'lr123', 'PAC': 'pac123', '7A': '7a123', '7B': '7b123', 'Admin': 'admin123' };
+            const activePasswords = passwords || defaultPasswords;
+
+            if (isInitialLoad && !passwords) {
+                 return (
+                    <div className="loading-overlay">
+                        <i className="ph-fill ph-hourglass-high animate-spin text-6xl text-blue-600 mb-4"></i>
+                        <h2 className="text-xl font-bold text-slate-800">Retrieving Live Board...</h2>
+                        <p className="text-sm text-slate-500 mt-2">Connecting to secure database</p>
+                    </div>
+                );
+            }
+
+            if (!userRole) {
+                return <LoginScreen passwords={activePasswords} onLogin={(role) => {
+                    setUserRole(role);
+                    if (audioCtx.state === 'suspended') audioCtx.resume();
+                }} />;
+            }
+
+            const isLR = userRole === 'LR' || userRole === 'Admin';
+
+            return (
+                <div className="min-h-screen flex flex-col h-screen overflow-hidden">
+                    <header className="bg-slate-900 text-white p-3 shadow-md flex justify-between items-center z-10 shrink-0">
+                        <div className="flex items-center gap-3">
+                            <i className="ph-fill ph-heartbeat text-3xl text-rose-500"></i>
+                            <div>
+                                <h1 className="text-xl font-bold leading-tight">LR Smart Board</h1>
+                                <p className="text-xs text-slate-400">O&G Hospital Tengku Permaisuri Norashikin</p>
+                            </div>
+                        </div>
+                        <div className="flex flex-col items-end gap-1.5">
+                            <div className="flex items-center gap-3">
+                                <span className="text-sm font-semibold text-slate-300">
+                                    Logged in as: <span className="text-white">{isLR ? (userRole === 'Admin' ? 'System Admin' : 'Labour Room Staff') : `Ward ${userRole} Staff`}</span>
+                                </span>
+                                {userRole === 'Admin' && (
+                                    <button onClick={() => setIsSettingsOpen(true)} className="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded font-medium flex items-center gap-1 shadow transition text-xs">
+                                        <i className="ph-bold ph-gear"></i> Passwords
+                                    </button>
+                                )}
+                                {!isLR && (
+                                    <button onClick={() => setIsBookingModalOpen(true)} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded font-medium flex items-center gap-2 shadow-lg transition text-sm">
+                                        <i className="ph-bold ph-plus"></i> Book Bed
+                                    </button>
+                                )}
+                                <button onClick={() => {setUserRole(null); setPatients([]);}} className="text-slate-400 hover:text-white px-2 py-1 rounded text-sm transition">Logout</button>
+                            </div>
+                            <div className="flex gap-2">
+                                {isSyncing && (
+                                    <div className="text-[11px] font-bold text-amber-400 flex items-center gap-1 bg-amber-900/40 px-2 py-0.5 rounded border border-amber-700">
+                                        <i className="ph-bold ph-arrows-clockwise animate-spin"></i> SYNCING...
+                                    </div>
+                                )}
+                                <div className="text-[12px] font-mono text-emerald-400 font-bold flex items-center gap-1.5 bg-slate-800/80 px-2 py-0.5 rounded border border-slate-700">
+                                    <i className="ph ph-clock"></i>
+                                    {new Date(currentTime).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase()}
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    {toast && (
+                        <div className={`fixed top-20 right-4 z-50 p-4 rounded-lg shadow-xl text-white font-medium flex items-center gap-3 animate-bounce ${toast.type === 'warning' ? 'bg-rose-500' : 'bg-emerald-500'}`}>
+                            <i className={`ph-fill ${toast.type === 'warning' ? 'ph-warning' : 'ph-check-circle'} text-2xl`}></i> {toast.message}
+                        </div>
+                    )}
+
+                    <div className="flex-1 flex overflow-hidden">
+                        <div className="w-1/3 bg-slate-200/40 border-r border-slate-300 flex flex-col">
+                            <div className="p-3 bg-white/50 border-b border-slate-300 flex justify-between items-center shrink-0">
+                                <h2 className="font-bold text-slate-800 text-base flex items-center gap-2">
+                                    <i className="ph-fill ph-list-numbers text-amber-500"></i> Waiting Queue
+                                </h2>
+                                <span className="bg-slate-700 text-white text-xs px-2 py-1 rounded-full font-bold">{waitingPatients.length} Waiting</span>
+                            </div>
+                            
+                            <div className="flex-1 overflow-y-auto p-3 custom-scrollbar flex flex-col gap-3">
+                                {waitingPatients.map((patient, index) => (
+                                    <PatientCard 
+                                        key={patient.id} 
+                                        patient={patient} 
+                                        userRole={userRole}
+                                        priorityScore={calculatePriority(patient)}
+                                        waitTime={formatWaitTime(patient.bookingTime)}
+                                        queueNumber={index + 1}
+                                        onCall={() => setAssignBedPatient(patient)}
+                                        onUpdate={() => setUpdateModalPatient(patient)}
+                                        onBumpUp={() => handleManualBumpUp(patient.id)}
+                                        onBumpDown={() => handleManualBumpDown(patient.id)}
+                                        onCancel={() => handleCancelBooking(patient.id)}
+                                        onAcknowledge={handleAcknowledgeAlert}
+                                        onWardSend={handleWardSend}
+                                        currentTime={currentTime}
+                                    />
+                                ))}
+                                {waitingPatients.length === 0 && (
+                                    <div className="text-center text-slate-400 mt-10 flex flex-col items-center">
+                                        <i className="ph-fill ph-check-circle text-4xl mb-2 text-slate-300"></i>
+                                        <p>Queue is empty.</p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="w-2/3 bg-slate-100 flex flex-col">
+                            <div className="p-3 bg-white/50 border-b border-slate-200 shrink-0 flex justify-between items-center">
+                                <h2 className="font-bold text-indigo-900 text-base flex items-center gap-2">
+                                    <i className="ph-fill ph-layout text-indigo-500"></i> Labour Room Board
+                                </h2>
+                            </div>
+                            <div className="flex-1 p-4 overflow-y-auto custom-scrollbar">
+                                <div className="grid grid-cols-2 gap-6">
+                                    <div className="flex flex-col gap-3">
+                                        {LR_BEDS_LEFT.map(bed => {
+                                            const occupant = patients.find(p => p.assignedBed === bed && (p.status === 'IN_LR' || p.status === 'DELIVERED'));
+                                            const incoming = patients.find(p => p.calledToBed === bed && (p.status === 'CALLED' || p.status === 'EN_ROUTE'));
+                                            return <BedSlot key={bed} bedName={bed} patient={occupant} incoming={incoming} isLR={isLR} currentTime={currentTime} onUpdate={() => setUpdateModalPatient(occupant)} onDeliver={() => setDeliverModalPatient(occupant)} onSendToOT={() => handleSendToOT(occupant?.id)} onClear={() => handleClearBed(occupant?.id)} onArrived={handlePatientArrived} onAcknowledge={handleAcknowledgeAlert} onMoveBed={() => setMoveBedPatient(occupant)} />;
+                                        })}
+                                    </div>
+                                    <div className="flex flex-col gap-3">
+                                        {LR_BEDS_RIGHT.map(bed => {
+                                            const occupant = patients.find(p => p.assignedBed === bed && (p.status === 'IN_LR' || p.status === 'DELIVERED'));
+                                            const incoming = patients.find(p => p.calledToBed === bed && (p.status === 'CALLED' || p.status === 'EN_ROUTE'));
+                                            return <BedSlot key={bed} bedName={bed} patient={occupant} incoming={incoming} isLR={isLR} currentTime={currentTime} onUpdate={() => setUpdateModalPatient(occupant)} onDeliver={() => setDeliverModalPatient(occupant)} onSendToOT={() => handleSendToOT(occupant?.id)} onClear={() => handleClearBed(occupant?.id)} onArrived={handlePatientArrived} onAcknowledge={handleAcknowledgeAlert} onMoveBed={() => setMoveBedPatient(occupant)} />;
+                                        })}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {isSettingsOpen && <SettingsModal passwords={activePasswords} onClose={() => setIsSettingsOpen(false)} onSave={handleUpdatePasswords} />}
+                    {isBookingModalOpen && <BookingForm userWard={userRole} onClose={() => setIsBookingModalOpen(false)} onSave={handleNewBooking} />}
+                    {updateModalPatient && <UpdateForm patient={updateModalPatient} onClose={() => setUpdateModalPatient(null)} onSave={handleStatusUpdate} />}
+                    
+                    {assignBedPatient && <AssignBedModal patient={assignBedPatient} activePatients={patients} onClose={() => setAssignBedPatient(null)} onConfirm={handleConfirmBedAssignment} />}
+                    {moveBedPatient && <AssignBedModal patient={moveBedPatient} activePatients={patients} onClose={() => setMoveBedPatient(null)} onConfirm={handleConfirmMoveBed} isMoveMode={true} />}
+                    
+                    {deliverModalPatient && <DeliveryModal patient={deliverModalPatient} onClose={() => setDeliverModalPatient(null)} onConfirm={handleConfirmDelivery} />}
+                </div>
+            );
+        };
+
+        const LoginScreen = ({ onLogin, passwords }) => {
+            const handleLogin = (e) => {
+                e.preventDefault();
+                const role = e.target.role.value;
+                const pwd = e.target.password.value;
+                if (passwords[role] && pwd === passwords[role]) onLogin(role);
+                else alert('Incorrect password');
+            };
+
+            return (
+                <div className="min-h-screen bg-slate-100 flex items-center justify-center">
+                    <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md border border-slate-200">
+                        <div className="text-center mb-6">
+                            <i className="ph-fill ph-heartbeat text-5xl text-rose-500 mb-2"></i>
+                            <h1 className="text-2xl font-bold text-slate-800">LR Smart Board</h1>
+                            <p className="text-sm text-slate-500">Hospital Tengku Permaisuri Norashikin</p>
+                        </div>
+                        <form onSubmit={handleLogin} className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-bold text-slate-700 mb-1">Select Department</label>
+                                <select name="role" className="w-full border border-slate-300 rounded-lg p-2.5 bg-slate-50">
+                                    <option value="LR">Labour Room (LR)</option>
+                                    <option value="PAC">PAC</option>
+                                    <option value="7A">Ward 7A</option>
+                                    <option value="7B">Ward 7B</option>
+                                    <option value="Admin">System Admin</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-bold text-slate-700 mb-1">Password</label>
+                                <input required type="password" name="password" className="w-full border border-slate-300 rounded-lg p-2.5 bg-slate-50" />
+                            </div>
+                            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg transition shadow-md">
+                                Access Board
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const SettingsModal = ({ passwords, onClose, onSave }) => {
+            const [localPwds, setLocalPwds] = React.useState(passwords);
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                onSave(localPwds);
+            };
+
+            return (
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6 relative">
+                        <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><i className="ph ph-x text-xl"></i></button>
+                        <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2"><i className="ph-fill ph-lock-key text-indigo-500"></i> Manage Passwords</h2>
+                        <form onSubmit={handleSubmit} className="space-y-3">
+                            {Object.entries(localPwds).map(([role, pwd]) => (
+                                <div key={role} className="flex items-center gap-3">
+                                    <label className="w-20 text-sm font-bold text-slate-600">{role}</label>
+                                    <input type="text" value={pwd} onChange={(e) => setLocalPwds({...localPwds, [role]: e.target.value})} className="flex-1 border border-slate-300 rounded p-2 text-sm bg-slate-50 focus:bg-white" required />
+                                </div>
+                            ))}
+                            <div className="pt-4 border-t mt-4 flex justify-end gap-2">
+                                <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-semibold text-slate-500 hover:bg-slate-100 rounded transition">Cancel</button>
+                                <button type="submit" className="px-4 py-2 text-sm font-semibold bg-indigo-600 text-white rounded hover:bg-indigo-500 shadow transition">Save Passwords</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const PatientCard = ({ patient, userRole, priorityScore, waitTime, queueNumber, onCall, onUpdate, onBumpUp, onBumpDown, onCancel, onAcknowledge, onWardSend, currentTime }) => {
+            const [ackName, setAckName] = React.useState('');
+            const [wardAckName, setWardAckName] = React.useState('');
+            
+            const isLR = userRole === 'LR' || userRole === 'Admin';
+            const canEdit = isLR || patient.location === userRole;
+            
+            let urgencyClass = 'urgency-low';
+            if (priorityScore > 40) urgencyClass = 'urgency-high';
+            else if (priorityScore > 20) urgencyClass = 'urgency-med';
+
+            const myAlertRole = isLR ? 'LR' : userRole;
+            const needsNormalAck = patient.lastVE?.alertRole === myAlertRole;
+            const isReviewOverdue = patient.lastVE?.nextReviewTime && currentTime > new Date(patient.lastVE.nextReviewTime).getTime();
+            const needsReviewAck = isReviewOverdue && !patient.lastVE?.reviewAcked && isLR;
+
+            const hasActiveAlert = needsNormalAck || needsReviewAck;
+
+            const memLiqStr = (() => {
+                if (patient.membrane === 'Intact') return 'MI';
+                let l = patient.liquor;
+                if (l === 'Clear') l = 'CL';
+                else if (l === 'Blood stained') l = 'Blood';
+                const timeStr = patient.romTime ? ` (${formatDateTimeDisp(patient.romTime)})` : '';
+                if (patient.membrane === 'PROM_MI') return `PROM/SROM${timeStr} - MI - ${l}`;
+                return `${patient.membrane}${timeStr} - ${l}`;
+            })();
+            const isAbnormalLiq = patient.membrane !== 'Intact' && !['Clear', 'N/A'].includes(patient.liquor);
+
+            return (
+                <div className={`patient-card bg-white rounded-lg shadow-sm p-3 border relative flex flex-col ${urgencyClass} ${hasActiveAlert ? 'active-alert' : 'border-slate-200'}`}>
+                    
+                    {hasActiveAlert && (
+                        <div className="bg-red-100 border border-red-300 rounded p-2 mb-3 shadow-inner">
+                            <div className="text-red-700 font-bold text-[11px] flex items-center gap-1.5 mb-1.5 animate-pulse uppercase tracking-wider">
+                                <i className="ph-fill ph-warning-circle text-lg"></i> ACTION REQUIRED: {needsNormalAck ? patient.lastVE?.alertMsg : 'NEXT REVIEW OVERDUE'}
+                            </div>
+                            <div className="flex gap-2">
+                                <input type="text" value={ackName} onChange={e => setAckName(e.target.value)} placeholder="Your Name (MO/SN)" className="flex-1 text-xs p-1.5 border border-red-300 rounded bg-white outline-none focus:border-red-500" />
+                                <button onClick={() => { if(ackName) onAcknowledge(patient.id, ackName, needsNormalAck ? 'NORMAL' : 'REVIEW'); }} className="bg-red-600 hover:bg-red-500 text-white text-[11px] font-bold px-3 py-1.5 rounded shadow-sm transition">ACKNOWLEDGE</button>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="flex justify-between items-start mb-2">
+                        <div className="flex gap-2.5">
+                            <div className="bg-slate-800 text-white rounded w-6 h-6 flex items-center justify-center font-bold text-sm shrink-0 shadow-sm mt-0.5">{queueNumber}</div>
+                            <div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                    <h3 className="font-bold text-slate-800 leading-none text-sm">{patient.name}</h3>
+                                    {patient.manualOverride !== null && patient.manualOverride !== 0 && (
+                                        <span className={`px-1 py-0.5 rounded text-[9px] font-bold uppercase flex items-center gap-0.5 border ${patient.manualOverride > 0 ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-slate-200 text-slate-600 border-slate-300'}`}>
+                                            {patient.manualOverride > 0 ? <i className="ph-fill ph-star"></i> : <i className="ph-bold ph-arrow-down"></i>} MO {patient.manualOverride > 0 ? `+${patient.manualOverride}` : patient.manualOverride}
+                                        </span>
+                                    )}
+                                </div>
+                                <p className="text-[10px] text-slate-500 font-mono mt-1">{patient.ic} • G{patient.gravida} P{patient.para} • {patient.poa}</p>
+                            </div>
+                        </div>
+                        <div className="text-right flex flex-col items-end gap-1 shrink-0">
+                            <span className="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded text-[9px] font-bold border border-blue-200 flex items-center gap-1"><i className="ph-fill ph-map-pin"></i> {patient.location}</span>
+                            <span className="text-[10px] text-slate-500 font-bold flex items-center gap-1"><i className="ph ph-clock"></i> {waitTime}</span>
+                        </div>
+                    </div>
+
+                    <div className="text-[10px] space-y-1.5 mb-3 bg-slate-50 p-2 rounded border border-slate-100 relative">
+                        <div className="flex justify-between items-start">
+                            <p><span className="font-bold text-slate-600">Type:</span> <span className="text-indigo-600 font-bold">{patient.admissionType}</span></p>
+                            {(patient.gbs || patient.epidural) && (
+                                <div className="flex gap-1">
+                                    {patient.gbs && <span className="px-1.5 py-0.5 bg-rose-100 text-rose-700 font-bold rounded text-[9px] shadow-sm border border-rose-200">GBS +ve</span>}
+                                    {patient.epidural && <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 font-bold rounded text-[9px] shadow-sm border border-blue-200">Epidural</span>}
+                                </div>
+                            )}
+                        </div>
+                        {patient.issues && patient.issues.length > 0 && <p><span className="font-bold text-slate-600">Risk/Issues:</span> <span className="text-rose-600 font-semibold leading-tight">{patient.issues.join(', ')}</span></p>}
+                        
+                        <div className="flex justify-between gap-1 pt-1 border-t border-slate-200/60 mt-1">
+                            <p><span className="font-bold text-slate-600">VE:</span> {patient.lastVE?.dilation}cm, Cx {patient.lastVE?.cervix} <span className="text-slate-400">(@ {formatDateTimeDisp(patient.lastVE?.time)})</span></p>
+                        </div>
+
+                        {patient.lastVE?.nextReviewTime && (
+                            <div className={`mt-1 px-1.5 py-0.5 rounded text-[10px] font-bold border shadow-sm flex items-center justify-center gap-1 w-full ${isReviewOverdue ? 'bg-rose-500 text-white border-rose-600' : 'bg-slate-200 text-slate-700 border-slate-300'}`}>
+                                <i className="ph-fill ph-clock"></i> Next Review: {formatDateTimeDisp(patient.lastVE.nextReviewTime)}
+                            </div>
+                        )}
+
+                        <div className="flex justify-between gap-1 mt-1 border-t border-slate-100 pt-1">
+                            <p><span className="font-bold text-slate-600">Memb:</span> <span className={`${isAbnormalLiq ? 'text-red-600 font-bold' : 'text-slate-700 font-semibold'}`}>{memLiqStr}</span></p>
+                            <p><span className="font-bold text-slate-600">CTG:</span> <span className={patient.ctg === 'Normal' ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>{patient.ctg}</span></p>
+                        </div>
+                    </div>
+
+                    <div className="mt-auto">
+                        {patient.status === 'CALLED' ? (
+                            <div className="bg-blue-50 border-t-2 border-blue-400 p-2 -mx-3 -mb-3 rounded-b-lg">
+                                <div className="text-[11px] font-bold text-blue-800 mb-2 flex items-center justify-between">
+                                    <span className="flex items-center gap-1"><i className="ph-fill ph-bell-ringing animate-bounce text-blue-600"></i> CALLED TO {patient.calledToBed}</span>
+                                    <span>@ {formatDateTimeDisp(patient.callTime)}</span>
+                                </div>
+                                {!isLR ? (
+                                    canEdit ? (
+                                        <div className="flex gap-2">
+                                            <input type="text" value={wardAckName} onChange={e => setWardAckName(e.target.value)} placeholder="Sent By (Name)" className="flex-1 text-xs p-1.5 border border-blue-300 rounded bg-white outline-none focus:border-blue-500" />
+                                            <button onClick={() => { if(wardAckName) onWardSend(patient.id, wardAckName); }} className="bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold px-3 py-1.5 rounded shadow-sm transition">Confirm Transfer</button>
+                                        </div>
+                                    ) : (
+                                        <div className="text-center py-1.5 bg-blue-100/70 rounded text-blue-700 text-[10px] font-bold border border-blue-200">Awaiting {patient.location} Transfer</div>
+                                    )
+                                ) : (
+                                    <div className="text-center py-1.5 bg-blue-100/70 rounded text-blue-700 text-[10px] font-bold border border-blue-200">Awaiting Ward Transfer</div>
+                                )}
+                            </div>
+                        ) : patient.status === 'EN_ROUTE' ? (
+                            <div className="bg-indigo-50 border-t-2 border-indigo-400 p-2 -mx-3 -mb-3 rounded-b-lg flex justify-center text-[11px] font-bold text-indigo-800 gap-1"><i className="ph-fill ph-person-simple-walk animate-bounce text-indigo-600 text-base"></i> PATIENT EN ROUTE TO LR</div>
+                        ) : (
+                            <>
+                                <div className="flex flex-wrap gap-1.5 mb-2">
+                                    {!isLR ? (
+                                        canEdit ? (
+                                            <>
+                                                <button onClick={onUpdate} className={`flex-1 ${isReviewOverdue ? 'bg-rose-100 hover:bg-rose-200 text-rose-800 border-rose-300' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-300'} text-[10px] font-bold py-1.5 rounded transition border shadow-sm flex items-center justify-center gap-1`}>
+                                                    <i className="ph-bold ph-pencil-simple"></i> Update VE
+                                                </button>
+                                                <button onClick={onCancel} className="flex-none bg-rose-50 hover:bg-rose-100 text-rose-700 text-[10px] font-bold px-3 py-1.5 rounded transition border border-rose-300 shadow-sm"><i className="ph-bold ph-x"></i> Cancel</button>
+                                            </>
+                                        ) : (
+                                            <div className="w-full text-center py-1.5 text-[10px] text-slate-400 font-bold border border-slate-200 rounded bg-slate-50 uppercase tracking-wide">View Only (Booked by {patient.location})</div>
+                                        )
+                                    ) : (
+                                        <>
+                                            <button onClick={onCall} className="flex-1 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold py-1.5 rounded transition shadow-sm flex items-center justify-center gap-1"><i className="ph-bold ph-bed"></i> Call to Bed</button>
+                                            <div className="flex gap-1 flex-none">
+                                                <button onClick={onBumpUp} className="bg-slate-100 hover:bg-amber-100 text-slate-600 hover:text-amber-700 text-[11px] px-2 py-1.5 rounded border border-slate-200 transition"><i className="ph-bold ph-arrow-up"></i></button>
+                                                <button onClick={onBumpDown} className="bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] px-2 py-1.5 rounded border border-slate-200 transition"><i className="ph-bold ph-arrow-down"></i></button>
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                                <div className="bg-slate-50 border-t border-slate-200 p-2 -mx-3 -mb-3 rounded-b-lg flex flex-col gap-1.5">
+                                    <div className="text-[10px] flex justify-between items-center text-slate-500">
+                                        <span><i className="ph-fill ph-user text-slate-400"></i> Booked: <span className="font-bold text-slate-700">{patient.bookedBy || 'Unknown'}</span></span>
+                                        {patient.notedBy && <span className="text-emerald-600 font-medium flex items-center gap-1"><i className="ph-bold ph-check-circle"></i> Noted: {patient.notedBy}</span>}
+                                    </div>
+                                </div>
+                            </>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const DeliveryModal = ({ patient, onClose, onConfirm }) => {
+            const handleSubmit = (e) => { e.preventDefault(); onConfirm(e.target.deliveryTime.value); };
+            const now = new Date();
+            const timeStr = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
+            return (
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5">
+                        <h2 className="text-lg font-bold text-emerald-700 mb-1 flex items-center gap-2"><i className="ph-fill ph-baby"></i> Record Delivery</h2>
+                        <p className="text-sm text-slate-500 mb-4">{patient.name}</p>
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <div><label className="block text-xs font-bold text-slate-600 mb-1">Exact Time of Delivery</label><input required name="deliveryTime" type="time" defaultValue={timeStr} className="w-full border rounded p-2 text-lg font-bold text-center bg-slate-50" /></div>
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-semibold text-slate-500 hover:text-slate-700">Cancel</button>
+                                <button type="submit" className="px-4 py-2 text-sm font-semibold bg-emerald-500 text-white rounded hover:bg-emerald-400 shadow">Confirm</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const BookingForm = ({ userWard, onClose, onSave }) => {
+            const [isIOL, setIsIOL] = React.useState(false);
+            const [isObese, setIsObese] = React.useState(false);
+            const [isHPT, setIsHPT] = React.useState(false);
+            const [membraneStatus, setMembraneStatus] = React.useState('Intact');
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                const fd = new FormData(e.target);
+                const issues = [];
+                if(fd.get('issue_scar')) issues.push('1 Prev Scar');
+                if(fd.get('issue_hpt')) {
+                    const hptType = fd.get('hpt_type');
+                    const hptTx = fd.get('hpt_treatment') === 'yes' ? '(On Tx)' : '(No Tx)';
+                    if(hptType) issues.push(`${hptType} ${hptTx}`);
+                }
+                if(fd.get('issue_bmi')) issues.push(`Obesity BMI ${fd.get('bmi_value') || 'Unknown'}`);
+                if(fd.get('issue_size')) issues.push(fd.get('issue_size'));
+                const otherIssues = fd.get('other_issues');
+                if(otherIssues) otherIssues.split(',').forEach(i => { if(i.trim()) issues.push(i.trim()); });
+
+                let admissionType = fd.get('admissionType');
+                if (admissionType === 'IOL' && fd.get('iol_indication')) {
+                    admissionType = `IOL - ${fd.get('iol_indication')}`;
+                    const methods = ['px1', 'px2', 'px3', 'foley', 'ss'].map(m => fd.get(`method_${m}`)).filter(Boolean);
+                    if (methods.length > 0) admissionType += ` (${methods.join(' + ')})`;
+                }
+
+                const membrane = fd.get('membrane');
+                const veTime = fd.get('veTime');
+                const romTime = membrane === 'Intact' ? null : (fd.get('romTime') || null);
+
+                // Convert interval to ISO time
+                let nextReviewTime = null;
+                if (fd.get('reviewInterval')) {
+                    const veDate = new Date(veTime);
+                    veDate.setHours(veDate.getHours() + parseInt(fd.get('reviewInterval'), 10));
+                    const pad = (n) => String(n).padStart(2, '0');
+                    nextReviewTime = `${veDate.getFullYear()}-${pad(veDate.getMonth() + 1)}-${pad(veDate.getDate())}T${pad(veDate.getHours())}:${pad(veDate.getMinutes())}:00`;
+                }
+
+                onSave({
+                    id: Date.now().toString(), name: fd.get('name'), ic: fd.get('ic'),
+                    location: userWard, bookingTime: new Date().toISOString(),
+                    bookedBy: fd.get('bookedBy'), notedBy: null, notedTime: null,
+                    gravida: fd.get('gravida'), para: fd.get('para'), poa: fd.get('poa'),
+                    issues: issues.filter(Boolean), admissionType, gbs: fd.get('gbs') === 'on', epidural: fd.get('epidural') === 'on',
+                    lastVE: { 
+                        time: veTime, 
+                        dilation: fd.get('veDilation'), 
+                        cervix: fd.get('veCervix'), 
+                        nextReviewTime: nextReviewTime 
+                    }, 
+                    membrane, liquor: membrane === 'Intact' ? 'N/A' : (fd.get('liquor') || 'N/A'), romTime, ctg: fd.get('ctg'),
+                    status: 'WAITING', assignedBed: null, deliveryTime: null, basePriority: 0, manualOverride: null
+                });
+            };
+
+            return (
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl mt-10 p-6 relative">
+                        <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><i className="ph ph-x text-2xl"></i></button>
+                        <h2 className="text-xl font-bold text-slate-800 mb-6 border-b pb-2">Book New LR Bed</h2>
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <div className="grid grid-cols-12 gap-4">
+                                <div className="col-span-5"><label className="block text-xs font-bold text-slate-600 mb-1">Patient Name</label><input required name="name" type="text" className="w-full border rounded p-2 text-sm bg-slate-50 focus:bg-white" /></div>
+                                <div className="col-span-4"><label className="block text-xs font-bold text-slate-600 mb-1">ID / Passport / MRN</label><input required name="ic" type="text" className="w-full border rounded p-2 text-sm bg-slate-50" /></div>
+                                <div className="col-span-3"><label className="block text-xs font-bold text-slate-600 mb-1">Location</label><input type="text" value={userWard} readOnly className="w-full border border-blue-200 rounded p-2 text-sm bg-blue-50 font-bold text-blue-800" /></div>
+                            </div>
+                            <div className="grid grid-cols-12 gap-4">
+                                <div className="col-span-5"><label className="block text-xs font-bold text-slate-600 mb-1">Booked By (Staff Name)</label><input required name="bookedBy" type="text" className="w-full border border-indigo-200 rounded p-2 text-sm bg-indigo-50 focus:bg-white" /></div>
+                                <div className="col-span-2"><label className="block text-xs font-bold text-slate-600 mb-1">Gravida</label><input required name="gravida" type="number" min="1" className="w-full border rounded p-2 text-sm bg-slate-50" /></div>
+                                <div className="col-span-2"><label className="block text-xs font-bold text-slate-600 mb-1">Para</label><input required name="para" type="number" min="0" className="w-full border rounded p-2 text-sm bg-slate-50" /></div>
+                                <div className="col-span-3"><label className="block text-xs font-bold text-slate-600 mb-1">POA (Weeks+Days)</label><input required name="poa" type="text" className="w-full border rounded p-2 text-sm bg-slate-50" /></div>
+                            </div>
+                            <hr className="my-2 border-slate-100" />
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 mb-2">Antenatal Issues & Risk Factors</label>
+                                <div className="flex flex-wrap items-center gap-4 text-sm mb-3">
+                                    <label className="flex items-center gap-1"><input type="checkbox" name="issue_scar" /> 1 Prev Scar</label>
+                                    <label className="flex items-center gap-1"><input type="checkbox" name="issue_hpt" onChange={(e) => setIsHPT(e.target.checked)} /> HPT/PIH/PE</label>
+                                    {isHPT && (
+                                        <div className="flex gap-2 bg-amber-50 p-1 rounded border border-amber-200 shadow-sm">
+                                            <select name="hpt_type" className="border border-amber-300 rounded p-1 text-xs bg-white text-amber-900 font-semibold outline-none" required>
+                                                <option value="">Select Diagnosis...</option>
+                                                <option value="Chronic HPT">Chronic HPT</option>
+                                                <option value="PIH">PIH</option>
+                                                <option value="PE">Pre-eclampsia (PE)</option>
+                                            </select>
+                                            <select name="hpt_treatment" className="border border-amber-300 rounded p-1 text-xs bg-white text-amber-900 font-semibold outline-none" required>
+                                                <option value="">Treatment?</option>
+                                                <option value="yes">On Treatment</option>
+                                                <option value="no">No Treatment</option>
+                                            </select>
+                                        </div>
+                                    )}
+                                    <label className="flex items-center gap-1"><input type="checkbox" name="issue_bmi" onChange={(e) => setIsObese(e.target.checked)} /> Obesity</label>
+                                    {isObese && <input type="number" step="0.1" name="bmi_value" placeholder="BMI" className="border rounded p-1 text-xs w-20 bg-slate-50" required />}
+                                    <select name="issue_size" className="border rounded p-1 text-sm bg-slate-50">
+                                        <option value="">Normal Growth</option><option value="LGA">LGA (Macrosomia)</option><option value="SGA/FGR">SGA/FGR</option>
+                                    </select>
+                                </div>
+                                <input type="text" name="other_issues" placeholder="Other issues (e.g. GDM on diet/insulin, comma separated)" className="w-full border rounded p-2 text-sm bg-slate-50" />
+                            </div>
+                            <div className="grid grid-cols-3 gap-4 mt-4">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-600 mb-1">Admission Type</label>
+                                    <select name="admissionType" onChange={(e) => setIsIOL(e.target.value === 'IOL')} className="w-full border rounded p-2 text-sm bg-slate-50">
+                                        <option value="Spontaneous">Spontaneous</option><option value="IOL">IOL - Indication</option>
+                                    </select>
+                                </div>
+                                <div className="col-span-2">
+                                    {isIOL && (
+                                        <div className="flex flex-col gap-3 bg-slate-100/50 p-3 rounded border border-slate-200 mt-1">
+                                            <div><label className="block text-xs font-bold text-slate-600 mb-1">Indication for IOL</label><input type="text" name="iol_indication" className="w-full border rounded p-2 text-sm bg-white" required /></div>
+                                            <div>
+                                                <label className="block text-xs font-bold text-slate-600 mb-2">Methods Used</label>
+                                                <div className="flex flex-wrap gap-x-4 gap-y-2">
+                                                    <label className="flex items-center gap-1 text-xs"><input type="checkbox" name="method_px1" value="Prostin x1" /> Prostin x1</label>
+                                                    <label className="flex items-center gap-1 text-xs"><input type="checkbox" name="method_px2" value="Prostin x2" /> Prostin x2</label>
+                                                    <label className="flex items-center gap-1 text-xs"><input type="checkbox" name="method_px3" value="Prostin x3" /> Prostin x3</label>
+                                                    <label className="flex items-center gap-1 text-xs"><input type="checkbox" name="method_foley" value="Foley" /> Foley</label>
+                                                    <label className="flex items-center gap-1 text-xs"><input type="checkbox" name="method_ss" value="S&S" /> S&S</label>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-6 mt-2 mb-4">
+                                <label className="flex items-center gap-2 text-sm font-semibold text-rose-700 bg-rose-50 px-2 py-1 rounded"><input type="checkbox" name="gbs" className="w-4 h-4 text-blue-600 rounded" /> GBS Positive</label>
+                                <label className="flex items-center gap-2 text-sm font-semibold text-blue-700 bg-blue-50 px-2 py-1 rounded"><input type="checkbox" name="epidural" className="w-4 h-4 text-blue-600 rounded" /> Epidural Req.</label>
+                            </div>
+                            <hr className="my-2 border-slate-100" />
+                            
+                            <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 space-y-3">
+                                <div className="grid grid-cols-5 gap-4 items-end">
+                                    <div className="col-span-2"><label className="block text-xs font-bold text-slate-600 mb-1">VE Date/Time</label><CustomDateTimePicker name="veTime" /></div>
+                                    <div><label className="block text-xs font-bold text-slate-600 mb-1">Os (cm)</label><input required name="veDilation" type="number" min="0" max="10" className="w-full border rounded p-1.5 text-xs bg-white" /></div>
+                                    <div><label className="block text-xs font-bold text-slate-600 mb-1">Cx Effac.</label><input required name="veCervix" type="text" className="w-full border rounded p-1.5 text-xs bg-white" /></div>
+                                    <div>
+                                        <label className="block text-[10px] font-bold text-blue-800 mb-1">Review In:</label>
+                                        <select name="reviewInterval" className="w-full border border-blue-300 rounded p-1.5 text-xs font-semibold text-blue-900 bg-blue-100">
+                                            <option value="">No Timer</option>
+                                            <option value="1">1 Hour</option>
+                                            <option value="2">2 Hours</option>
+                                            <option value="3">3 Hours</option>
+                                            <option value="4">4 Hours</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-4 gap-4 items-end">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1">Membrane</label>
+                                        <select name="membrane" value={membraneStatus} onChange={(e) => setMembraneStatus(e.target.value)} className="w-full border rounded p-1.5 text-xs bg-white">
+                                            <option value="Intact">Intact (MI)</option><option value="SROM">Spont. (SROM)</option><option value="PROM_MI">PROM/SROM (Hindwater)</option><option value="ARM">Artificial (ARM)</option>
+                                        </select>
+                                    </div>
+                                    <div className="col-span-2">
+                                        <label className={`block text-xs font-bold mb-1 ${membraneStatus === 'Intact' ? 'text-slate-400' : 'text-slate-600'}`}>ROM Date/Time</label>
+                                        <CustomDateTimePicker name="romTime" disabled={membraneStatus === 'Intact'} />
+                                    </div>
+                                    <div>
+                                        <label className={`block text-xs font-bold mb-1 ${membraneStatus === 'Intact' ? 'text-slate-400' : 'text-slate-600'}`}>Liquor</label>
+                                        <select name="liquor" disabled={membraneStatus === 'Intact'} className="w-full border rounded p-1.5 text-xs bg-white disabled:bg-slate-100">
+                                            <option value="N/A">N/A</option><option value="Clear">Clear</option><option value="LMSL">LMSL</option><option value="MMSL">MMSL</option><option value="TMSL">TMSL</option><option value="Blood stained">Blood stained</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-600 mb-1">Current CTG</label>
+                                    <select name="ctg" className="w-full border rounded p-1.5 text-xs font-semibold bg-white">
+                                        <option value="Normal" className="text-green-600">Normal</option><option value="Suspicious" className="text-amber-600">Suspicious</option><option value="Pathological" className="text-red-600">Pathological</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div className="flex justify-end gap-3 pt-4 border-t mt-4">
+                                <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-semibold text-slate-500 hover:text-slate-700">Cancel</button>
+                                <button type="submit" className="px-4 py-2 text-sm font-semibold bg-blue-600 text-white rounded hover:bg-blue-500 shadow-md">Submit Booking</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const UpdateForm = ({ patient, onClose, onSave }) => {
+            const [membraneStatus, setMembraneStatus] = React.useState(patient.membrane);
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                const fd = new FormData(e.target);
+                const membrane = fd.get('membrane');
+                const veTime = fd.get('veTime');
+                const romTime = membrane === 'Intact' ? null : (fd.get('romTime') || null);
+                
+                const reviewInterval = fd.get('reviewInterval');
+                let nextReviewTime = patient.lastVE?.nextReviewTime; 
+                
+                if (reviewInterval === 'CLEAR') {
+                    nextReviewTime = null;
+                } else if (reviewInterval) {
+                    const veDate = new Date(veTime);
+                    veDate.setHours(veDate.getHours() + parseInt(reviewInterval, 10));
+                    const pad = (n) => String(n).padStart(2, '0');
+                    nextReviewTime = `${veDate.getFullYear()}-${pad(veDate.getMonth() + 1)}-${pad(veDate.getDate())}T${pad(veDate.getHours())}:${pad(veDate.getMinutes())}:00`;
+                }
+
+                onSave({
+                    id: patient.id,
+                    lastVE: { 
+                        time: veTime, 
+                        dilation: fd.get('veDilation'), 
+                        cervix: fd.get('veCervix'),
+                        nextReviewTime: nextReviewTime
+                    },
+                    membrane, liquor: membrane === 'Intact' ? 'N/A' : (fd.get('liquor') || 'N/A'), romTime, ctg: fd.get('ctg'),
+                    epidural: fd.get('epidural') === 'on'
+                });
+            };
+            return (
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6 relative">
+                        <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><i className="ph ph-x text-xl"></i></button>
+                        <h2 className="text-lg font-bold text-slate-800 mb-1">Update Clinical Status</h2>
+                        <p className="text-sm text-slate-500 mb-4 pb-2 border-b">{patient.name}</p>
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <div className="grid grid-cols-4 gap-4 items-end">
+                                <div className="col-span-2"><label className="block text-xs font-bold text-slate-600 mb-1">VE Date/Time</label><CustomDateTimePicker name="veTime" defaultValue={patient.lastVE?.time} /></div>
+                                <div><label className="block text-xs font-bold text-slate-600 mb-1">Os (cm)</label><input required name="veDilation" type="number" min="0" max="10" defaultValue={patient.lastVE?.dilation} className="w-full border rounded p-1.5 text-xs bg-slate-50" /></div>
+                                <div><label className="block text-xs font-bold text-slate-600 mb-1">Cervix</label><input required name="veCervix" type="text" defaultValue={patient.lastVE?.cervix} className="w-full border rounded p-1.5 text-xs bg-slate-50" /></div>
+                            </div>
+                            <div>
+                                <label className="block text-[11px] font-bold text-blue-800 mb-1">Plan Next Review In:</label>
+                                <select name="reviewInterval" className="w-full border border-blue-300 rounded p-1.5 text-xs font-semibold text-blue-900 bg-blue-50">
+                                    <option value="">Keep Current Timer</option>
+                                    <option value="CLEAR">Remove Timer</option>
+                                    <option value="1">1 Hour</option>
+                                    <option value="2">2 Hours</option>
+                                    <option value="3">3 Hours</option>
+                                    <option value="4">4 Hours</option>
+                                </select>
+                            </div>
+                            <div className="grid grid-cols-4 gap-3 items-end">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-600 mb-1">Membrane</label>
+                                    <select name="membrane" value={membraneStatus} onChange={(e) => setMembraneStatus(e.target.value)} className="w-full border rounded p-1.5 text-[11px] bg-slate-50">
+                                        <option value="Intact">Intact (MI)</option><option value="SROM">Spont. (SROM)</option><option value="PROM_MI">PROM/SROM</option><option value="ARM">Artificial (ARM)</option>
+                                    </select>
+                                </div>
+                                <div className="col-span-2">
+                                    <label className={`block text-xs font-bold mb-1 ${membraneStatus === 'Intact' ? 'text-slate-400' : 'text-slate-600'}`}>ROM Time</label>
+                                    <CustomDateTimePicker name="romTime" defaultValue={patient.romTime} disabled={membraneStatus === 'Intact'} />
+                                </div>
+                                <div>
+                                    <label className={`block text-xs font-bold mb-1 ${membraneStatus === 'Intact' ? 'text-slate-400' : 'text-slate-600'}`}>Liquor</label>
+                                    <select name="liquor" defaultValue={patient.liquor} disabled={membraneStatus === 'Intact'} className="w-full border rounded p-1.5 text-xs bg-slate-50 disabled:opacity-50">
+                                        <option value="N/A">N/A</option><option value="Clear">Clear</option><option value="LMSL">LMSL</option><option value="MMSL">MMSL</option><option value="TMSL">TMSL</option><option value="Blood stained">Blood stained</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 mb-1">CTG Status</label>
+                                <select name="ctg" defaultValue={patient.ctg} className="w-full border rounded p-1.5 text-xs font-semibold bg-slate-50">
+                                    <option value="Normal">Normal</option><option value="Suspicious">Suspicious</option><option value="Pathological">Pathol.</option>
+                                </select>
+                            </div>
+                            <div className="flex items-center gap-4 pt-2 border-t mt-2">
+                                <label className="flex items-center gap-2 text-xs font-semibold text-blue-700 bg-blue-50 px-2 py-1.5 rounded border border-blue-100 cursor-pointer hover:bg-blue-100 transition">
+                                    <input type="checkbox" name="epidural" defaultChecked={patient.epidural} className="w-4 h-4 text-blue-600 rounded" /> 
+                                    Epidural (Active / Requested)
+                                </label>
+                            </div>
+                            <div className="flex justify-end gap-3 pt-4">
+                                <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-semibold text-slate-500 hover:text-slate-700">Cancel</button>
+                                <button type="submit" className="px-4 py-2 text-sm font-semibold bg-indigo-600 text-white rounded hover:bg-indigo-500 shadow">Update Status</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
